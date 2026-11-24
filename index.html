@@ -2963,6 +2963,7 @@ function createDefaultState() {
     rims: JSON.parse(JSON.stringify(DEFAULT_RIMS)),
     uiAssets: JSON.parse(JSON.stringify(DEFAULT_UI_ASSETS)),
     fuelStore: JSON.parse(JSON.stringify(DEFAULT_FUEL_STORE)),
+    ghosts: [],
     bankConfig: JSON.parse(JSON.stringify(DEFAULT_BANK_CONFIG)),
     auctionCars: JSON.parse(JSON.stringify(DEFAULT_AUCTION_CARS)),
     arenaConfig: JSON.parse(JSON.stringify(DEFAULT_ARENA_CONFIG)),
@@ -3031,6 +3032,497 @@ let activeTuningSubTab = 'parts';
 let activeMainTab = 'garage';
 let activeRaceSubTab = 'street';
 let activeTournInnerTab = 'active';
+
+
+
+/* ==========================================================================
+   ПРИЗРАКИ ИГРОКОВ ИЗ ГАРАЖА И ОБЩИЙ JSON-КОНФИГ (7vik_shared_config.json)
+   ========================================================================== */
+const SHARED_CONFIG_FILE = './7vik_shared_config.json';
+
+function getCurrentPlayerDisplayName() {
+  try {
+    if (typeof currentUserKey === 'string' && currentUserKey && state.profiles && state.profiles[currentUserKey]?.username) {
+      return state.profiles[currentUserKey].username;
+    }
+  } catch (e) {}
+  return (state.player && state.player.username) || 'Racer';
+}
+
+function createGhostRecordFromGarage(mode, eventId, telemetry = {}) {
+  const activeId = state.selectedCarId || state.activeCarId || (state.ownedCars && state.ownedCars[0]) || 'granta';
+  const baseCar = (typeof getCarObj === 'function') ? getCarObj(activeId) : { id: activeId, name: activeId, cls: 'D' };
+  const stats = (typeof getCarStats === 'function')
+    ? getCarStats(baseCar.id)
+    : { power: baseCar.basePower || 120, weight: baseCar.baseWeight || 1200, grip: baseCar.baseGrip || 60, nitroDur: 2.0 };
+
+  const playerName = getCurrentPlayerDisplayName();
+  const safeMode = mode || 'tournament';
+  const safeEvent = eventId || 'default';
+  const cleanSamples = Array.isArray(telemetry.samples)
+    ? telemetry.samples.slice(-180).map(s => ({
+        t: Number(Number(s.t || 0).toFixed(2)),
+        d: Number(Number(s.d || 0).toFixed(1)),
+        v: Math.round(Number(s.v || 0)),
+        g: Number(s.g || 1),
+        n: Boolean(s.n)
+      }))
+    : [];
+
+  return {
+    ghostId: `ghost_${safeMode}_${safeEvent}_${playerName}_${Date.now()}`,
+    playerName,
+    mode: safeMode,
+    eventId: String(safeEvent),
+    recordedAt: new Date().toISOString(),
+    carSnapshot: {
+      carId: baseCar.id,
+      brand: baseCar.brand || '',
+      name: baseCar.name || baseCar.id,
+      cls: baseCar.cls || 'D',
+      color: baseCar.color || '#ff3b30',
+      rimId: baseCar.rimId || 'stock',
+      wheelRadius: Number(baseCar.wheelRadius) || 16,
+      rearWheelX: typeof baseCar.rearWheelX === 'number' ? baseCar.rearWheelX : null,
+      frontWheelX: typeof baseCar.frontWheelX === 'number' ? baseCar.frontWheelX : null,
+      wheelYOffset: typeof baseCar.wheelYOffset === 'number' ? baseCar.wheelYOffset : null,
+      spriteUrl: baseCar.spriteUrl || '',
+      wheelUrl: baseCar.wheelUrl || '',
+      power: Number(stats.power) || Number(baseCar.basePower) || 120,
+      weight: Number(stats.weight) || Number(baseCar.baseWeight) || 1200,
+      grip: Number(stats.grip) || Number(baseCar.baseGrip) || 60,
+      nitroDur: Number(stats.nitroDur) || 2.0
+    },
+    raceResult: {
+      distanceMeters: 402,
+      finishTimeSec: Number(Number(telemetry.finishTimeSec || 12.5).toFixed(2)),
+      topSpeedKmh: Math.round(Number(telemetry.topSpeedKmh || 220)),
+      samples: cleanSamples
+    }
+  };
+}
+
+function mergeGhostRecords(existingList, incomingList) {
+  const byKey = new Map();
+  const addItem = (g) => {
+    if (!g || typeof g !== 'object' || !g.carSnapshot || !g.raceResult) return;
+    const key = `${g.mode || 'tournament'}::${g.eventId || 'default'}::${g.playerName || 'Racer'}`;
+    const prev = byKey.get(key);
+    const curTime = Number(g.raceResult.finishTimeSec) || 999;
+    const prevTime = prev ? (Number(prev.raceResult?.finishTimeSec) || 999) : 999;
+    if (!prev || curTime <= prevTime || new Date(g.recordedAt || 0) >= new Date(prev.recordedAt || 0)) {
+      byKey.set(key, {
+        ...g,
+        raceResult: {
+          distanceMeters: 402,
+          finishTimeSec: curTime,
+          topSpeedKmh: Math.round(Number(g.raceResult.topSpeedKmh) || 0),
+          samples: Array.isArray(g.raceResult.samples) ? g.raceResult.samples : []
+        }
+      });
+    }
+  };
+  (Array.isArray(existingList) ? existingList : []).forEach(addItem);
+  (Array.isArray(incomingList) ? incomingList : []).forEach(addItem);
+  return Array.from(byKey.values()).sort((a, b) => (a.raceResult?.finishTimeSec || 999) - (b.raceResult?.finishTimeSec || 999)).slice(0, 120);
+}
+
+function recordGhostSampleIfNeeded(rs, force = false) {
+  if (!rs || rs.phase !== 'racing') return;
+  if (!Array.isArray(rs.ghostSamples)) rs.ghostSamples = [];
+  const lastSample = rs.ghostSamples[rs.ghostSamples.length - 1];
+  if (!force && lastSample && (rs.elapsed - lastSample.t) < 0.12) return;
+  const speedKmh = Math.round(Number(rs.pSpeed || 0) * 3.6);
+  if (!Number.isFinite(rs.ghostTopSpeedKmh) || speedKmh > rs.ghostTopSpeedKmh) {
+    rs.ghostTopSpeedKmh = speedKmh;
+  }
+  rs.ghostSamples.push({
+    t: Number(rs.elapsed.toFixed(2)),
+    d: Number(Math.min(402, Math.max(0, rs.pDist || 0)).toFixed(1)),
+    v: speedKmh,
+    g: Number(rs.gear || 1),
+    n: Boolean(rs.nitroActive)
+  });
+}
+
+function sampleGhostAtTime(ghost, tSec) {
+  const res = ghost && ghost.raceResult ? ghost.raceResult : {};
+  const finishTime = Math.max(0.5, Number(res.finishTimeSec) || 12);
+  const samples = Array.isArray(res.samples) ? res.samples : [];
+  if (samples.length >= 2) {
+    if (tSec <= samples[0].t) return { ...samples[0], finished: false };
+    for (let i = 0; i < samples.length - 1; i++) {
+      const a = samples[i];
+      const b = samples[i + 1];
+      if (tSec >= a.t && tSec <= b.t) {
+        const k = (tSec - a.t) / Math.max(0.0001, b.t - a.t);
+        return {
+          t: tSec,
+          d: a.d + (b.d - a.d) * k,
+          v: a.v + (b.v - a.v) * k,
+          g: k < 0.5 ? a.g : b.g,
+          n: Boolean(a.n || b.n),
+          finished: false
+        };
+      }
+    }
+    const last = samples[samples.length - 1];
+    return { ...last, d: Math.max(402, Number(last.d) || 402), finished: true };
+  }
+  const ratio = Math.min(1, Math.max(0, tSec / finishTime));
+  return {
+    t: tSec,
+    d: ratio * 402,
+    v: (Number(res.topSpeedKmh) || 220) * Math.min(1, ratio * 1.25),
+    g: Math.min(6, 1 + Math.floor(ratio * 5)),
+    n: ratio > 0.35 && ratio < 0.65,
+    finished: ratio >= 1
+  };
+}
+
+function isGhostAllowedInMode(mode) {
+  return mode === 'tournament' || mode === 'arena';
+}
+
+function pickGhostOpponentForEvent(mode, eventId, playerName) {
+  if (!isGhostAllowedInMode(mode)) return null;
+  const list = Array.isArray(state.ghosts) ? state.ghosts : [];
+  const me = (playerName || getCurrentPlayerDisplayName() || '').toLowerCase();
+  const candidates = list.filter(g => {
+    if (!g || !g.carSnapshot || !g.raceResult) return false;
+    if (!isGhostAllowedInMode(g.mode)) return false;
+    if ((g.playerName || '').toLowerCase() === me) return false;
+    if (eventId && String(g.eventId) === String(eventId)) return true;
+    return mode && g.mode === mode;
+  });
+  if (!candidates.length) return null;
+  return candidates[Math.floor(Math.random() * candidates.length)];
+}
+
+function buildCarObjFromGhostSnapshot(snap) {
+  if (!snap) return null;
+  return {
+    id: snap.carId || 'ghost_car',
+    brand: snap.brand || '',
+    name: snap.name || snap.carId || 'Призрак',
+    cls: snap.cls || 'D',
+    color: snap.color || '#00e5ff',
+    rimId: snap.rimId || 'stock',
+    wheelRadius: Number(snap.wheelRadius) || 16,
+    rearWheelX: typeof snap.rearWheelX === 'number' ? snap.rearWheelX : undefined,
+    frontWheelX: typeof snap.frontWheelX === 'number' ? snap.frontWheelX : undefined,
+    wheelYOffset: typeof snap.wheelYOffset === 'number' ? snap.wheelYOffset : undefined,
+    spriteUrl: snap.spriteUrl || '',
+    wheelUrl: snap.wheelUrl || ''
+  };
+}
+
+function drawGhostCar(ctx, ghost, x, y, scale = 0.92, wheelAngle = 0, isNitro = false) {
+  if (!ghost || !ghost.carSnapshot || !isGhostAllowedInMode(ghost.mode)) return;
+  const snap = ghost.carSnapshot;
+  const ghostCar = buildCarObjFromGhostSnapshot(snap);
+  ctx.save();
+  ctx.globalAlpha = 0.58;
+  if (typeof drawCarOnCanvas === 'function') {
+    drawCarOnCanvas(ctx, x, y, snap.color || '#00e5ff', scale, wheelAngle, isNitro, ghostCar);
+  }
+  ctx.globalAlpha = 0.95;
+  ctx.font = 'bold 11px -apple-system, BlinkMacSystemFont, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#00e5ff';
+  ctx.fillText(`👻 ${ghost.playerName} • ${snap.name}`, x, y - 48 * scale);
+  ctx.restore();
+}
+
+function finalizeAndStoreRaceGhost(rs, finalTime) {
+  if (!rs) return;
+  const mode = rs.loc?.isTournament ? 'tournament' : (rs.loc?.isArena ? 'arena' : 'street');
+  if (!isGhostAllowedInMode(mode)) return;
+  recordGhostSampleIfNeeded(rs, true);
+  const eventId = rs.loc?.tournamentId || rs.loc?.id || 'street';
+  const record = createGhostRecordFromGarage(mode, eventId, {
+    finishTimeSec: finalTime,
+    topSpeedKmh: rs.ghostTopSpeedKmh || Math.round((rs.pSpeed || 0) * 3.6),
+    samples: rs.ghostSamples || []
+  });
+  state.ghosts = mergeGhostRecords(state.ghosts || [], [record]);
+  if (typeof cloudSyncGhosts === 'function') {
+    cloudSyncGhosts(record);
+  }
+  if (typeof addAdminLog === 'function') {
+    addAdminLog(`Сохранён призрак ${record.playerName} (${record.carSnapshot.name}) — ${record.raceResult.finishTimeSec}с`);
+  }
+}
+
+function buildSharedAdminPayload() {
+  normalizeAndSyncSharedAdminState(state);
+  return {
+    version: 75,
+    updatedAt: new Date().toISOString(),
+    cars: JSON.parse(JSON.stringify(state.cars || [])),
+    auctionCars: JSON.parse(JSON.stringify(state.auctionCars || [])),
+    rims: JSON.parse(JSON.stringify(state.rims || [])),
+    colors: JSON.parse(JSON.stringify(state.colors || [])),
+    locations: JSON.parse(JSON.stringify(state.locations || [])),
+    arenaConfig: JSON.parse(JSON.stringify(state.arenaConfig || {})),
+    tournaments: JSON.parse(JSON.stringify(state.tournaments || [])),
+    fuelStore: JSON.parse(JSON.stringify(state.fuelStore || [])),
+    bankConfig: JSON.parse(JSON.stringify(state.bankConfig || {})),
+    uiAssets: JSON.parse(JSON.stringify(state.uiAssets || DEFAULT_UI_ASSETS)),
+    ghosts: JSON.parse(JSON.stringify(state.ghosts || []))
+  };
+}
+
+function applySharedAdminPayload(cfg) {
+  if (!cfg || typeof cfg !== 'object') return false;
+  if (Array.isArray(cfg.cars) && cfg.cars.length) state.cars = JSON.parse(JSON.stringify(cfg.cars));
+  if (Array.isArray(cfg.auctionCars) && cfg.auctionCars.length) state.auctionCars = JSON.parse(JSON.stringify(cfg.auctionCars));
+  if (Array.isArray(cfg.rims) && cfg.rims.length) state.rims = JSON.parse(JSON.stringify(cfg.rims));
+  if (Array.isArray(cfg.colors) && cfg.colors.length) state.colors = JSON.parse(JSON.stringify(cfg.colors));
+  if (Array.isArray(cfg.locations) && cfg.locations.length) state.locations = JSON.parse(JSON.stringify(cfg.locations));
+  if (cfg.arenaConfig && typeof cfg.arenaConfig === 'object') state.arenaConfig = JSON.parse(JSON.stringify(cfg.arenaConfig));
+  if (Array.isArray(cfg.tournaments) && cfg.tournaments.length) state.tournaments = JSON.parse(JSON.stringify(cfg.tournaments));
+  if (Array.isArray(cfg.fuelStore) && cfg.fuelStore.length) state.fuelStore = JSON.parse(JSON.stringify(cfg.fuelStore));
+  if (cfg.bankConfig && typeof cfg.bankConfig === 'object') state.bankConfig = JSON.parse(JSON.stringify(cfg.bankConfig));
+  if (cfg.uiAssets && typeof cfg.uiAssets === 'object') {
+    state.uiAssets = Object.assign(JSON.parse(JSON.stringify(DEFAULT_UI_ASSETS)), cfg.uiAssets);
+  }
+  if (Array.isArray(cfg.ghosts)) {
+    state.ghosts = mergeGhostRecords(state.ghosts || [], cfg.ghosts);
+  }
+  normalizeAndSyncSharedAdminState(state);
+  return true;
+}
+
+async function fetchRemoteSharedConfig() {
+  try {
+    if (window.location.protocol === 'file:') return null;
+    const resp = await fetch(`${SHARED_CONFIG_FILE}?t=${Date.now()}`, { cache: 'no-store' });
+    if (!resp.ok) return null;
+    const json = await resp.json();
+    return (json && typeof json === 'object') ? json : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+
+/* ==========================================================================
+   ОБЛАЧНАЯ СИНХРОНИЗАЦИЯ (SUPABASE): КОНФИГ АДМИНКИ, ПРИЗРАКИ И РЕЙТИНГИ
+   ========================================================================== */
+const CLOUD_SYNC = {
+  url: 'https://yjwzuaqhvoignmevxeku.supabase.co',
+  anonKey: 'Sb_publishable_zoc4HOzgZqSgGkTzbTbuWg_ffIGxCys',
+  pollIntervalMs: 25000,
+  _timerId: null
+};
+
+function isCloudConfigured() {
+  return Boolean(
+    CLOUD_SYNC.url &&
+    CLOUD_SYNC.anonKey &&
+    !CLOUD_SYNC.url.includes('YOUR_PROJECT_ID') &&
+    !CLOUD_SYNC.anonKey.includes('PASTE_SUPABASE_PUBLISHABLE_OR_ANON_KEY_HERE')
+  );
+}
+
+function cloudHeaders(merge = true) {
+  const h = {
+    'apikey': CLOUD_SYNC.anonKey,
+    'Authorization': `Bearer ${CLOUD_SYNC.anonKey}`,
+    'Content-Type': 'application/json'
+  };
+  if (merge) h['Prefer'] = 'resolution=merge-duplicates,return=minimal';
+  return h;
+}
+
+async function cloudPullSharedConfig(forceApply = false) {
+  if (!isCloudConfigured()) return false;
+  try {
+    const res = await fetch(
+      `${CLOUD_SYNC.url}/rest/v1/game_config?id=eq.main&select=payload,updated_at`,
+      { headers: cloudHeaders(false) }
+    );
+    if (!res.ok) return false;
+    const rows = await res.json();
+    const row = Array.isArray(rows) ? rows[0] : null;
+    if (!row || !row.payload || typeof row.payload !== 'object' || !Object.keys(row.payload).length) {
+      return false;
+    }
+    const prevTs = new Date(state.sharedConfigUpdatedAt || 0).getTime();
+    const nextTs = new Date(row.updated_at || 0).getTime();
+    if (forceApply || nextTs > prevTs || !state.sharedConfigUpdatedAt) {
+      state.sharedConfigUpdatedAt = row.updated_at || new Date().toISOString();
+      applySharedAdminPayload(row.payload);
+      broadcastSharedAdminChanges();
+      return true;
+    }
+    return false;
+  } catch (e) {
+    console.warn('cloudPullSharedConfig error:', e);
+    return false;
+  }
+}
+
+async function cloudPushSharedConfig() {
+  if (!isCloudConfigured()) return false;
+  try {
+    const payload = buildSharedAdminPayload();
+    const updatedAt = new Date().toISOString();
+    const res = await fetch(`${CLOUD_SYNC.url}/rest/v1/game_config`, {
+      method: 'POST',
+      headers: cloudHeaders(true),
+      body: JSON.stringify([{ id: 'main', payload, updated_at: updatedAt }])
+    });
+    if (!res.ok) return false;
+    state.sharedConfigUpdatedAt = updatedAt;
+    return true;
+  } catch (e) {
+    console.warn('cloudPushSharedConfig error:', e);
+    return false;
+  }
+}
+
+async function cloudSyncGhosts(newGhostRecord = null) {
+  if (!isCloudConfigured()) return state.ghosts || [];
+  try {
+    if (newGhostRecord && typeof isGhostAllowedInMode === 'function' && isGhostAllowedInMode(newGhostRecord.mode)) {
+      const ghostKey = `${newGhostRecord.mode}::${newGhostRecord.eventId || 'default'}::${newGhostRecord.playerName || 'Racer'}`;
+      await fetch(`${CLOUD_SYNC.url}/rest/v1/game_ghosts`, {
+        method: 'POST',
+        headers: cloudHeaders(true),
+        body: JSON.stringify([{
+          ghost_key: ghostKey,
+          mode: newGhostRecord.mode,
+          event_id: String(newGhostRecord.eventId || 'default'),
+          player_name: String(newGhostRecord.playerName || 'Racer'),
+          finish_time_sec: Number(newGhostRecord.raceResult?.finishTimeSec) || 99,
+          payload: newGhostRecord,
+          recorded_at: newGhostRecord.recordedAt || new Date().toISOString()
+        }])
+      });
+    }
+
+    const res = await fetch(
+      `${CLOUD_SYNC.url}/rest/v1/game_ghosts?mode=in.(arena,tournament)&select=payload&order=finish_time_sec.asc&limit=120`,
+      { headers: cloudHeaders(false) }
+    );
+    if (!res.ok) return state.ghosts || [];
+    const rows = await res.json();
+    const remoteGhosts = (Array.isArray(rows) ? rows : [])
+      .map(r => r.payload)
+      .filter(g => g && typeof isGhostAllowedInMode === 'function' && isGhostAllowedInMode(g.mode));
+    state.ghosts = mergeGhostRecords(state.ghosts || [], remoteGhosts);
+    return state.ghosts;
+  } catch (e) {
+    console.warn('cloudSyncGhosts error:', e);
+    return state.ghosts || [];
+  }
+}
+
+async function cloudPushScore(scoreEntry) {
+  if (!isCloudConfigured() || !scoreEntry) return;
+  if (scoreEntry.mode !== 'arena' && scoreEntry.mode !== 'tournament') return;
+  try {
+    const scoreKey = `${scoreEntry.mode}::${scoreEntry.eventId || 'default'}::${scoreEntry.playerName || 'Racer'}`;
+    await fetch(`${CLOUD_SYNC.url}/rest/v1/game_scores`, {
+      method: 'POST',
+      headers: cloudHeaders(true),
+      body: JSON.stringify([{
+        score_key: scoreKey,
+        mode: scoreEntry.mode,
+        event_id: String(scoreEntry.eventId || 'default'),
+        player_name: String(scoreEntry.playerName || 'Racer'),
+        wins: Number(scoreEntry.wins) || 0,
+        best_time_sec: (Number(scoreEntry.bestTimeSec) > 0) ? Number(scoreEntry.bestTimeSec) : null,
+        car_name: String(scoreEntry.carName || ''),
+        car_hp: Number(scoreEntry.carHp) || 0,
+        updated_at: new Date().toISOString()
+      }])
+    });
+  } catch (e) {
+    console.warn('cloudPushScore error:', e);
+  }
+}
+
+async function cloudFetchScores(mode, eventId = null) {
+  if (!isCloudConfigured()) return [];
+  try {
+    const params = ['select=*'];
+    if (mode === 'arena' || mode === 'tournament') params.push(`mode=eq.${mode}`);
+    if (eventId) params.push(`event_id=eq.${encodeURIComponent(String(eventId))}`);
+    params.push('order=wins.desc,best_time_sec.asc', 'limit=100');
+    const res = await fetch(`${CLOUD_SYNC.url}/rest/v1/game_scores?${params.join('&')}`, {
+      headers: cloudHeaders(false)
+    });
+    if (!res.ok) return [];
+    const rows = await res.json();
+    return Array.isArray(rows) ? rows : [];
+  } catch (e) {
+    console.warn('cloudFetchScores error:', e);
+    return [];
+  }
+}
+
+function startCloudSyncLoop() {
+  if (!isCloudConfigured() || CLOUD_SYNC._timerId) return;
+  CLOUD_SYNC._timerId = setInterval(() => {
+    if (document.hidden) return;
+    if (typeof raceState !== 'undefined' && raceState && raceState.active) return;
+    cloudPullSharedConfig(false);
+    cloudSyncGhosts(null);
+  }, CLOUD_SYNC.pollIntervalMs);
+}
+
+function downloadSharedConfigJson() {
+  const payload = buildSharedAdminPayload();
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = '7vik_shared_config.json';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  addAdminLog(`Скачан общий конфиг 7vik_shared_config.json (призраков: ${(payload.ghosts || []).length})`);
+  showToast('⬇️ Скачан 7vik_shared_config.json — положите рядом с index.html');
+}
+
+function normalizeAndSyncSharedAdminState(targetState) {
+  if (!targetState) return;
+  targetState.uiAssets = Object.assign(
+    JSON.parse(JSON.stringify(DEFAULT_UI_ASSETS)),
+    targetState.uiAssets || {},
+    {
+      statIcons: Object.assign({}, DEFAULT_UI_ASSETS.statIcons, (targetState.uiAssets && targetState.uiAssets.statIcons) || {}),
+      specConfig: Object.assign({}, JSON.parse(JSON.stringify(DEFAULT_UI_ASSETS.specConfig)), (targetState.uiAssets && targetState.uiAssets.specConfig) || {}),
+      typography: Object.assign({}, (targetState.uiAssets && targetState.uiAssets.typography) || {}),
+      buttons: Object.assign({}, JSON.parse(JSON.stringify(DEFAULT_UI_ASSETS.buttons)), (targetState.uiAssets && targetState.uiAssets.buttons) || {}),
+      sounds: Object.assign({}, (targetState.uiAssets && targetState.uiAssets.sounds) || {})
+    }
+  );
+  if (!Array.isArray(targetState.rims) || !targetState.rims.length) {
+    targetState.rims = JSON.parse(JSON.stringify(DEFAULT_RIMS));
+  }
+  if (!Array.isArray(targetState.colors) || !targetState.colors.length) {
+    targetState.colors = JSON.parse(JSON.stringify(DEFAULT_COLORS));
+  }
+  const syncCarWheelFields = (arr) => {
+    (arr || []).forEach(c => {
+      if (['bmw_m5_rim', 'suv_offroad', 'suv_sport'].includes(c.rimId)) c.rimId = 'stock';
+      if (!c.rimId) c.rimId = 'stock';
+      if (typeof c.wheelUrl !== 'string') c.wheelUrl = '';
+    });
+  };
+  syncCarWheelFields(targetState.cars);
+  syncCarWheelFields(targetState.auctionCars);
+  return targetState;
+}
+
+function broadcastSharedAdminChanges() {
+  normalizeAndSyncSharedAdminState(state);
+  preloadAllAssets();
+  applyCustomUIDesign();
+  updateUI();
+}
 
 function preloadAllAssets() {
   state.cars.forEach(c => {
@@ -4147,12 +4639,14 @@ function getCarStats(cid) {
 
 function getWheelEntryForCar(carObj) {
   if (!carObj) return null;
+  if (carObj.wheelUrl) {
+    const carWheel = IMAGE_CACHE['wheel_' + carObj.id];
+    if (carWheel && carWheel.loaded) return carWheel;
+  }
   if (carObj.rimId) {
     const rimEntry = IMAGE_CACHE['rim_' + carObj.rimId];
     if (rimEntry && rimEntry.loaded) return rimEntry;
   }
-  const carWheel = IMAGE_CACHE['wheel_' + carObj.id];
-  if (carWheel && carWheel.loaded) return carWheel;
   const stockRim = IMAGE_CACHE['rim_stock'];
   if (stockRim && stockRim.loaded) return stockRim;
   return null;
@@ -6582,8 +7076,22 @@ function launchRaceWithLoc(loc) {
     wheelAngle: 0,
     lastTime: performance.now(),
     particles: [],
-    shiftBanner: null
+    shiftBanner: null,
+    ghostSamples: [],
+    ghostTopSpeedKmh: 0,
+    activeGhost: loc.ghostOpponent || pickGhostOpponentForEvent(
+      loc.isTournament ? 'tournament' : (loc.isArena ? 'arena' : 'street'),
+      loc.tournamentId || loc.id,
+      getCurrentPlayerDisplayName()
+    ),
+    ghostCarObj: null,
+    ghostDist: 0,
+    ghostSpeedKmh: 0,
+    ghostNitro: false
   };
+  if (raceState.activeGhost && raceState.activeGhost.carSnapshot) {
+    raceState.ghostCarObj = buildCarObjFromGhostSnapshot(raceState.activeGhost.carSnapshot);
+  }
 
   document.getElementById('raceTrackName').textContent = loc.name;
   document.getElementById('raceRivalName').textContent = `Соперник: ${loc.rival} (${loc.aiPower} л.с.)`;
@@ -6728,7 +7236,14 @@ function raceLoop(now) {
     if (rs.displayRpm > launchRpmCap) rs.displayRpm = launchRpmCap;
 
     updateEngineSound(rs.displayRpm, rs.maxRpm, rs.gasPressed, false, rs.pStats.power);
-    document.getElementById('rpmBarFill').style.width = ((rs.displayRpm / rs.maxRpm) * 100) + '%';
+    recordGhostSampleIfNeeded(rs, false);
+  if (rs.activeGhost) {
+    const gState = sampleGhostAtTime(rs.activeGhost, rs.elapsed);
+    rs.ghostDist = Number(gState.d) || 0;
+    rs.ghostSpeedKmh = Number(gState.v) || 0;
+    rs.ghostNitro = Boolean(gState.n);
+  }
+  document.getElementById('rpmBarFill').style.width = ((rs.displayRpm / rs.maxRpm) * 100) + '%';
 
     if (rs.countdownTimer <= 0) {
       rs.phase = 'racing';
@@ -6999,6 +7514,9 @@ function closeRaceResultModal() {
 }
 
 function finishRace(isWin, finalTime) {
+  if (raceState) {
+    finalizeAndStoreRaceGhost(raceState, finalTime);
+  }
   setGas(false);
   stopEngineSound();
   resumeBgmAfterRace();
@@ -7044,6 +7562,26 @@ function finishRace(isWin, finalTime) {
     state.cash += earnedCash;
   }
 
+
+  if (isArena || isTourn) {
+    const pCarObj = (typeof getCarObj === 'function') ? getCarObj(state.selectedCarId) : null;
+    const pStatsObj = (pCarObj && typeof getCarStats === 'function') ? getCarStats(pCarObj.id) : { power: 0 };
+    const tId = isTourn ? String(raceState.loc.tournamentId || raceState.loc.id || 'default') : 'arena';
+    const curWins = isTourn
+      ? ((state.tournWins && state.tournWins[tId]) || 0)
+      : (Number(state.arenaWins) || 0);
+    if (typeof cloudPushScore === 'function') {
+      cloudPushScore({
+        mode: isArena ? 'arena' : 'tournament',
+        eventId: tId,
+        playerName: (typeof getCurrentPlayerDisplayName === 'function') ? getCurrentPlayerDisplayName() : 'Racer',
+        wins: curWins,
+        bestTimeSec: isWin ? finalTime : null,
+        carName: pCarObj ? pCarObj.name : '',
+        carHp: pStatsObj.power || 0
+      });
+    }
+  }
   saveGame();
   updateUI();
   showRaceResultModal({
@@ -7432,10 +7970,15 @@ async function adminSaveAll() {
     if (Number.isFinite(rVal) && rVal >= 0) p.rep = rVal;
     syncAdminTargetToLiveIfCurrent(tk);
   }
+  normalizeAndSyncSharedAdminState(state);
+  preloadAllAssets();
   syncLiveStateToCurrentProfile();
   populateAdminPlayerTargetSelect();
   renderAdminAccounts();
   const ok = await saveGame();
+  if (typeof cloudPushSharedConfig === 'function') {
+    await cloudPushSharedConfig();
+  }
   updateUI();
   addAdminLog('Все настройки сохранены в IndexedDB');
   showToast(ok ? '💾 Все изменения сохранены!' : '⚠️ Ошибка сохранения');
@@ -7655,7 +8198,8 @@ function adminUploadAnyCarWheel(source, idx, input) {
   compressImageToDataURL(f, 180, d => {
     arr[idx].wheelUrl = d;
     preloadImageAsset('wheel_' + arr[idx].id, d);
-    updateUI(); renderAdminCars(); showToast('Колесо загружено!');
+    saveGame();
+    updateUI(); renderAdminCars(); showToast('Колесо загружено и сохранено для всех игроков!');
   });
 }
 
@@ -8141,7 +8685,8 @@ function adminUploadExistingRim(idx, input) {
   compressImageToDataURL(f, 180, d => {
     state.rims[idx].url = d;
     preloadImageAsset('rim_' + state.rims[idx].id, d);
-    updateUI(); renderAdminTuning(); showToast('Спрайт диска обновлён!');
+    saveGame();
+    updateUI(); renderAdminTuning(); showToast('Спрайт диска обновлён и сохранён!');
   });
 }
 
@@ -8385,28 +8930,34 @@ function renderAdminDesign() {
 function adminUploadStatIcon(key, input) {
   const f = input.files && input.files[0]; if (!f) return;
   compressImageToDataURL(f, 96, d => {
+    if (!state.uiAssets.statIcons) state.uiAssets.statIcons = Object.assign({}, DEFAULT_UI_ASSETS.statIcons);
     state.uiAssets.statIcons[key] = d;
+    saveGame();
     applyCustomUIDesign(); renderAdminDesign();
-    showToast('Иконка обновлена!');
+    showToast('Иконка сохранена для всех игроков!');
   });
 }
 
 function adminUploadSpecIcon(key, input) {
   const f = input.files && input.files[0]; if (!f) return;
   compressImageToDataURL(f, 96, d => {
+    if (!state.uiAssets.specConfig) state.uiAssets.specConfig = JSON.parse(JSON.stringify(DEFAULT_UI_ASSETS.specConfig));
     state.uiAssets.specConfig[key].icon = d;
+    saveGame();
     applyCustomUIDesign(); renderAdminDesign();
-    showToast('Иконка характеристики обновлена!');
+    showToast('Иконка характеристики сохранена!');
   });
 }
 
 function adminUploadButtonImg(key, input) {
   const f = input.files && input.files[0]; if (!f) return;
   compressImageToDataURL(f, 480, d => {
+    if (!state.uiAssets.buttons) state.uiAssets.buttons = JSON.parse(JSON.stringify(DEFAULT_UI_ASSETS.buttons));
     if (!state.uiAssets.buttons[key]) state.uiAssets.buttons[key] = { text: '', img: '', icon: '' };
     state.uiAssets.buttons[key].img = d;
+    saveGame();
     applyCustomUIDesign(); renderAdminDesign();
-    showToast('Фон кнопки загружен!');
+    showToast('Фон кнопки сохранён для всех игроков!');
   });
 }
 
@@ -8415,8 +8966,9 @@ function adminUploadDesignAsset(key, input) {
   const maxW = (key === 'garageBg' || key === 'shopBg' || key === 'auctionBg') ? 960 : 480;
   compressImageToDataURL(f, maxW, d => {
     state.uiAssets[key] = d;
+    saveGame();
     updateUI(); renderAdminDesign();
-    showToast('Дизайн обновлён! Нажмите «Сохранить всё»');
+    showToast('Ассет дизайна сохранён для всех игроков!');
   });
 }
 
@@ -8557,7 +9109,17 @@ async function resetFullGame() {
   const saved = await dbLoadState();
   if (saved) {
     state = Object.assign(createDefaultState(), saved);
-    state.uiAssets = Object.assign(JSON.parse(JSON.stringify(DEFAULT_UI_ASSETS)), state.uiAssets || {});
+    normalizeAndSyncSharedAdminState(state);
+  }
+  const remoteShared = await fetchRemoteSharedConfig();
+  if (remoteShared && applySharedAdminPayload(remoteShared)) {
+    await dbSaveState(state);
+  }
+  if (typeof cloudPullSharedConfig === 'function') {
+    cloudPullSharedConfig(false).then(() => cloudSyncGhosts(null));
+    startCloudSyncLoop();
+  }
+  if (saved) {
     if (!state.colors || !state.colors.length) state.colors = JSON.parse(JSON.stringify(DEFAULT_COLORS));
     if (!state.rims || state.rims.length < DEFAULT_RIMS.length) {
       const existingById = {};

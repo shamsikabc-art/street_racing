@@ -1,4 +1,4 @@
-const CACHE_NAME = '7vik-racing-pwa-v73';
+const CACHE_NAME = '7vik-racing-pwa-v75';
 const ASSETS = [
   './',
   './index.html',
