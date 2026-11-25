@@ -1690,6 +1690,30 @@
         </div>
       </div>
 
+      <div id="guestAccountUpgradeBox" style="display:none; border-top:1px solid var(--border); padding-top:10px; margin-bottom:10px;">
+        <div style="font-size:12px; font-weight:800; color:var(--gold); margin-bottom:4px;">👤 Сохранить гостевой прогресс в аккаунт</div>
+        <p id="guestAccountUpgradeHint" style="font-size:11px; color:var(--muted); margin-bottom:8px;">
+          Придумайте логин и пароль — весь текущий прогресс, машины, деньги и задания перенесутся в постоянный аккаунт.
+        </p>
+        <div class="auth-error" id="guestUpgradeError"></div>
+        <div class="auth-success" id="guestUpgradeSuccess"></div>
+        <div class="form-group" style="margin-bottom:6px;">
+          <label>Новый логин</label>
+          <input type="text" id="guestUpgradeLogin" placeholder="Минимум 3 символа" maxlength="20" />
+        </div>
+        <div class="admin-grid-2" style="gap:6px; margin-bottom:6px;">
+          <div class="form-group" style="margin-bottom:0;">
+            <label>Пароль</label>
+            <input type="password" id="guestUpgradePass" placeholder="Минимум 4 символа" />
+          </div>
+          <div class="form-group" style="margin-bottom:0;">
+            <label>Повтор пароля</label>
+            <input type="password" id="guestUpgradePass2" placeholder="Ещё раз" />
+          </div>
+        </div>
+        <button type="button" class="btn btn-green btn-sm" style="width:100%;" onclick="convertGuestAccountToRegistered()">💾 Создать аккаунт и сохранить прогресс</button>
+      </div>
+
       <div class="form-group" style="border-top:1px solid var(--border); padding-top:10px; margin-bottom:0;">
         <label style="font-size:12px; font-weight:700; color:var(--nitro);" data-i18n="promo_lbl">🎁 Активация промокода</label>
         <div class="sprite-admin-row">
@@ -3040,6 +3064,7 @@ function syncLiveStateToCurrentProfile() {
   p.vikiIntroDone = !!state.vikiIntroDone;
   p.dailyTasks = state.dailyTasks ? JSON.parse(JSON.stringify(state.dailyTasks)) : null;
   p.auctionHpSort = state.auctionHpSort || 'asc';
+  p.updatedAt = new Date().toISOString();
 }
 
 let state = createDefaultState();
@@ -3290,6 +3315,10 @@ function buildSharedAdminPayload() {
     fuelStore: JSON.parse(JSON.stringify(state.fuelStore || [])),
     bankConfig: JSON.parse(JSON.stringify(state.bankConfig || {})),
     uiAssets: JSON.parse(JSON.stringify(state.uiAssets || DEFAULT_UI_ASSETS)),
+    supabaseConfig: (state.supabaseConfig && state.supabaseConfig.url) ? {
+      url: state.supabaseConfig.url,
+      anonKey: state.supabaseConfig.anonKey || ''
+    } : undefined,
     ghosts: JSON.parse(JSON.stringify(state.ghosts || []))
   };
 }
@@ -3307,6 +3336,9 @@ function applySharedAdminPayload(cfg) {
   if (cfg.bankConfig && typeof cfg.bankConfig === 'object') state.bankConfig = JSON.parse(JSON.stringify(cfg.bankConfig));
   if (cfg.uiAssets && typeof cfg.uiAssets === 'object') {
     state.uiAssets = Object.assign(JSON.parse(JSON.stringify(DEFAULT_UI_ASSETS)), cfg.uiAssets);
+  }
+  if (cfg.supabaseConfig && cfg.supabaseConfig.url) {
+    state.supabaseConfig = Object.assign({}, state.supabaseConfig || {}, cfg.supabaseConfig);
   }
   if (Array.isArray(cfg.ghosts)) {
     state.ghosts = mergeGhostRecords(state.ghosts || [], cfg.ghosts);
@@ -3426,6 +3458,43 @@ async function sbLoadGhosts(limit = 50) {
   const rows = await sbFetch(`game_ghosts?select=ghost_data&order=duration_ms.asc&limit=${limit}`);
   if (!Array.isArray(rows)) return [];
   return rows.map(r => r.ghost_data).filter(g => g && typeof g === 'object' && g.carSnapshot && g.raceResult);
+}
+
+
+async function sbSaveCurrentAccountProfile() {
+  if (!isSupabaseConfigured() || !currentAccountKey || !state.profiles || !state.profiles[currentAccountKey]) return null;
+  const prof = JSON.parse(JSON.stringify(state.profiles[currentAccountKey]));
+  return await sbFetch('game_config?on_conflict=key', {
+    method: 'POST',
+    prefer: 'resolution=merge-duplicates,return=minimal',
+    body: JSON.stringify([{
+      key: `player_profile_${currentAccountKey}`,
+      value: prof,
+      updated_at: new Date().toISOString()
+    }])
+  });
+}
+
+async function sbLoadAccountProfile(accountKey) {
+  if (!accountKey) return null;
+  const rows = await sbFetch(`game_config?key=eq.${encodeURIComponent('player_profile_' + accountKey)}&select=value&limit=1`);
+  if (Array.isArray(rows) && rows[0] && rows[0].value && typeof rows[0].value === 'object') {
+    return rows[0].value;
+  }
+  return null;
+}
+
+async function sbLoadAllPlayerProfiles() {
+  const rows = await sbFetch('game_config?key=like.player_profile_*&select=key,value');
+  if (!Array.isArray(rows)) return {};
+  const map = {};
+  rows.forEach(r => {
+    if (r && typeof r.key === 'string' && r.value && typeof r.value === 'object') {
+      const k = r.key.replace(/^player_profile_/, '');
+      if (k) map[k] = r.value;
+    }
+  });
+  return map;
 }
 
 function renderAdminSupabaseSettings() {
@@ -3908,6 +3977,13 @@ function setPlayerMasterVolume(val) {
   if (lbl) lbl.textContent = pct + '%';
 }
 
+function isCurrentGuestAccount() {
+  if (!currentAccountKey || !state.profiles || !state.profiles[currentAccountKey]) return false;
+  const p = state.profiles[currentAccountKey];
+  const uname = (p.username || currentAccount || '').trim();
+  return !p.password && /^racer_/i.test(uname);
+}
+
 function syncSettingsModalUI() {
   const sBtn = document.getElementById('settingsSoundBtn');
   if (sBtn) {
@@ -3925,6 +4001,99 @@ function syncSettingsModalUI() {
     rBtn.className = 'btn btn-sm ' + (state.lang !== 'en' ? 'btn-primary' : 'btn-secondary');
     eBtn.className = 'btn btn-sm ' + (state.lang === 'en' ? 'btn-primary' : 'btn-secondary');
   }
+  const guestBox = document.getElementById('guestAccountUpgradeBox');
+  const guestHint = document.getElementById('guestAccountUpgradeHint');
+  const errEl = document.getElementById('guestUpgradeError');
+  const okEl = document.getElementById('guestUpgradeSuccess');
+  if (errEl) { errEl.textContent = ''; errEl.classList.remove('show'); }
+  if (okEl) { okEl.textContent = ''; okEl.classList.remove('show'); }
+  if (guestBox) {
+    const isGuest = isCurrentGuestAccount();
+    guestBox.style.display = isGuest ? 'block' : 'none';
+    if (isGuest && guestHint) {
+      guestHint.textContent = `Текущий гость: ${currentAccount}. Задайте логин и пароль, чтобы сохранить весь прогресс аккаунта.`;
+    }
+  }
+}
+
+async function convertGuestAccountToRegistered() {
+  const errEl = document.getElementById('guestUpgradeError');
+  const okEl = document.getElementById('guestUpgradeSuccess');
+  if (errEl) { errEl.textContent = ''; errEl.classList.remove('show'); }
+  if (okEl) { okEl.textContent = ''; okEl.classList.remove('show'); }
+
+  const showUpErr = (msg) => {
+    if (errEl) { errEl.textContent = msg; errEl.classList.add('show'); }
+    showToast('⚠️ ' + msg);
+  };
+
+  if (!isCurrentGuestAccount()) {
+    return showUpErr('Этот раздел доступен только для гостевого профиля.');
+  }
+
+  const loginInp = document.getElementById('guestUpgradeLogin');
+  const passInp = document.getElementById('guestUpgradePass');
+  const pass2Inp = document.getElementById('guestUpgradePass2');
+  const newLogin = (loginInp ? loginInp.value : '').trim();
+  const newPass = passInp ? passInp.value : '';
+  const newPass2 = pass2Inp ? pass2Inp.value : '';
+
+  if (newLogin.length < 3) return showUpErr('Логин должен быть не короче 3 символов.');
+  if (newLogin.toLowerCase() === ADMIN_LOGIN.toLowerCase()) return showUpErr('Этот логин зарезервирован.');
+  if (newPass.length < 4) return showUpErr('Пароль должен быть не короче 4 символов.');
+  if (newPass !== newPass2) return showUpErr('Пароли не совпадают.');
+
+  if (!state.profiles) state.profiles = {};
+  const newKey = newLogin.toLowerCase();
+  const duplicate = Object.keys(state.profiles).some(k => {
+    if (k === currentAccountKey) return false;
+    const uname = (state.profiles[k] && state.profiles[k].username) ? state.profiles[k].username.trim().toLowerCase() : '';
+    return k.toLowerCase() === newKey || uname === newKey;
+  });
+  if (duplicate) return showUpErr('Такой логин уже занят другим игроком.');
+
+  syncLiveStateToCurrentProfile();
+  const oldKey = currentAccountKey;
+  const oldProfile = state.profiles[oldKey] || createFreshPlayerProfile(currentAccount || 'Racer', '');
+  const upgradedProfile = Object.assign({}, JSON.parse(JSON.stringify(oldProfile)), {
+    username: newLogin,
+    password: newPass,
+    updatedAt: new Date().toISOString()
+  });
+
+  state.profiles[newKey] = upgradedProfile;
+  if (oldKey && oldKey !== newKey) {
+    delete state.profiles[oldKey];
+  }
+
+  currentAccount = newLogin;
+  currentAccountKey = newKey;
+  isAdminUnlocked = false;
+
+  try {
+    localStorage.setItem(SESSION_LS_KEY, JSON.stringify({ username: newLogin, key: newKey, isAdmin: false }));
+  } catch (e) {}
+
+  document.getElementById('headerUserPill').textContent = '👤 ' + newLogin;
+  const adminBtn = document.getElementById('adminHeaderBtn');
+  if (adminBtn) adminBtn.classList.remove('visible');
+
+  await saveGame();
+  if (typeof isSupabaseConfigured === 'function' && isSupabaseConfigured() && typeof sbSaveCurrentAccountProfile === 'function') {
+    await sbSaveCurrentAccountProfile();
+  }
+
+  if (loginInp) loginInp.value = '';
+  if (passInp) passInp.value = '';
+  if (pass2Inp) pass2Inp.value = '';
+  if (okEl) {
+    okEl.textContent = `Аккаунт «${newLogin}» создан! Весь прогресс сохранён.`;
+    okEl.classList.add('show');
+  }
+  syncSettingsModalUI();
+  updateUI();
+  addAdminLog(`Гость переведён в постоянный аккаунт: ${newLogin}`);
+  showToast(`✅ Аккаунт «${newLogin}» сохранён!`);
 }
 
 function openSettingsModal() {
@@ -4068,6 +4237,16 @@ async function handleUserRegister() {
   if (pass !== pass2) return showAuthError('Пароли не совпадают! Проверьте повторный ввод.');
 
   if (!state.profiles) state.profiles = {};
+  if (typeof isSupabaseConfigured === 'function' && isSupabaseConfigured() && typeof sbLoadAllPlayerProfiles === 'function') {
+    const cloudProfiles = await sbLoadAllPlayerProfiles();
+    Object.keys(cloudProfiles).forEach(k => {
+      const cp = cloudProfiles[k];
+      const lp = state.profiles[k];
+      if (!lp || new Date(cp.updatedAt || 0) >= new Date(lp.updatedAt || 0)) {
+        state.profiles[k] = cp;
+      }
+    });
+  }
   const key = login.toLowerCase();
   const duplicate = Object.keys(state.profiles).some(k => k.toLowerCase() === key || (state.profiles[k].username || '').trim().toLowerCase() === key);
   if (duplicate) return showAuthError('Этот логин уже занят другим игроком! Придумайте уникальный логин.');
@@ -4189,9 +4368,13 @@ function submitAdminAuth() {
   }
 }
 
-async function saveGame() {
+async async function saveGame() {
   syncLiveStateToCurrentProfile();
-  return await dbSaveState(state);
+  const savedLocal = await dbSaveState(state);
+  if (typeof isSupabaseConfigured === 'function' && isSupabaseConfigured() && typeof sbSaveCurrentAccountProfile === 'function') {
+    sbSaveCurrentAccountProfile();
+  }
+  return savedLocal;
 }
 
 /* ==========================================================================
