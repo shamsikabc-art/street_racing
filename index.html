@@ -3464,20 +3464,12 @@ async function sbLoadGhosts(limit = 50) {
 async function sbSaveCurrentAccountProfile() {
   if (!isSupabaseConfigured() || !currentAccountKey || !state.profiles || !state.profiles[currentAccountKey]) return null;
   const prof = JSON.parse(JSON.stringify(state.profiles[currentAccountKey]));
-  return await sbFetch('game_config?on_conflict=key', {
-    method: 'POST',
-    prefer: 'resolution=merge-duplicates,return=minimal',
-    body: JSON.stringify([{
-      key: `player_profile_${currentAccountKey}`,
-      value: prof,
-      updated_at: new Date().toISOString()
-    }])
-  });
+  return await sbSavePlayerProfile(currentAccountKey, prof);
 }
 
 async function sbLoadAccountProfile(accountKey) {
   if (!accountKey) return null;
-  const rows = await sbFetch(`game_config?key=eq.${encodeURIComponent('player_profile_' + accountKey)}&select=value&limit=1`);
+  const rows = await sbFetch(`game_config?key=eq.${encodeURIComponent('profile_' + accountKey)}&select=value&limit=1`);
   if (Array.isArray(rows) && rows[0] && rows[0].value && typeof rows[0].value === 'object') {
     return rows[0].value;
   }
@@ -3485,12 +3477,12 @@ async function sbLoadAccountProfile(accountKey) {
 }
 
 async function sbLoadAllPlayerProfiles() {
-  const rows = await sbFetch('game_config?key=like.player_profile_*&select=key,value');
+  const rows = await sbFetch('game_config?key=like.profile_*&select=key,value');
   if (!Array.isArray(rows)) return {};
   const map = {};
   rows.forEach(r => {
     if (r && typeof r.key === 'string' && r.value && typeof r.value === 'object') {
-      const k = r.key.replace(/^player_profile_/, '');
+      const k = r.key.replace(/^profile_/, '');
       if (k) map[k] = r.value;
     }
   });
@@ -4303,10 +4295,20 @@ async function quickGuestPlay() {
   enterGameAsUser(guestName, key, false);
 }
 
-function enterGameAsUser(username, accountKey, isAdmin = false) {
+async function enterGameAsUser(username, accountKey, isAdmin = false) {
   currentAccount = username;
   currentAccountKey = accountKey;
   isAdminUnlocked = !!isAdmin;
+
+  if (typeof isSupabaseConfigured === 'function' && isSupabaseConfigured() && typeof sbLoadAccountProfile === 'function') {
+    const cloudProf = await sbLoadAccountProfile(accountKey);
+    if (cloudProf) {
+      const localProf = state.profiles[accountKey];
+      if (!localProf || new Date(cloudProf.updatedAt || 0) >= new Date(localProf.updatedAt || 0)) {
+        state.profiles[accountKey] = Object.assign(createFreshPlayerProfile(username, ''), cloudProf);
+      }
+    }
+  }
 
   if (!state.profiles[accountKey]) {
     state.profiles[accountKey] = createFreshPlayerProfile(username, '');
@@ -4368,7 +4370,7 @@ function submitAdminAuth() {
   }
 }
 
-async async function saveGame() {
+async function saveGame() {
   syncLiveStateToCurrentProfile();
   const savedLocal = await dbSaveState(state);
   if (typeof isSupabaseConfigured === 'function' && isSupabaseConfigured() && typeof sbSaveCurrentAccountProfile === 'function') {
@@ -9488,10 +9490,20 @@ async function resetFullGame() {
   let savedSession = null;
   try { savedSession = JSON.parse(localStorage.getItem(SESSION_LS_KEY)); } catch (e) {}
   if (savedSession && savedSession.key && state.profiles[savedSession.key]) {
-    enterGameAsUser(savedSession.username, savedSession.key, savedSession.isAdmin);
+    await enterGameAsUser(savedSession.username, savedSession.key, savedSession.isAdmin);
   } else {
     updateUI();
   }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && currentAccountKey) {
+      try { syncLiveStateToCurrentProfile(); } catch (e) {}
+      try { localStorage.setItem(LS_FALLBACK_KEY, JSON.stringify(state)); } catch (e) {}
+      if (typeof sbSaveCurrentAccountProfile === 'function' && isSupabaseConfigured()) {
+        sbSaveCurrentAccountProfile();
+      }
+    }
+  });
 })();
 
 
