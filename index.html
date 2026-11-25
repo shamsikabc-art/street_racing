@@ -3011,6 +3011,8 @@ function applyProfileToLiveState(profile) {
   state.joinedTournaments = profile.joinedTournaments ? JSON.parse(JSON.stringify(profile.joinedTournaments)) : {};
   state.lang = profile.lang || 'ru';
   state.vikiIntroDone = !!profile.vikiIntroDone;
+  state.dailyTasks = profile.dailyTasks ? JSON.parse(JSON.stringify(profile.dailyTasks)) : null;
+  state.auctionHpSort = profile.auctionHpSort || 'asc';
 }
 
 function syncLiveStateToCurrentProfile() {
@@ -3036,6 +3038,8 @@ function syncLiveStateToCurrentProfile() {
   p.joinedTournaments = JSON.parse(JSON.stringify(state.joinedTournaments || {}));
   p.lang = state.lang || 'ru';
   p.vikiIntroDone = !!state.vikiIntroDone;
+  p.dailyTasks = state.dailyTasks ? JSON.parse(JSON.stringify(state.dailyTasks)) : null;
+  p.auctionHpSort = state.auctionHpSort || 'asc';
 }
 
 let state = createDefaultState();
@@ -3272,6 +3276,7 @@ function finalizeAndStoreRaceGhost(rs, finalTime) {
 
 function buildSharedAdminPayload() {
   normalizeAndSyncSharedAdminState(state);
+  if (typeof ensureDailyTasks === 'function') ensureDailyTasks(false);
   return {
     version: 75,
     updatedAt: new Date().toISOString(),
@@ -3513,6 +3518,17 @@ function claimDailyTaskReward(taskId) {
   playSfx('win');
   saveGame();
   updateUI();
+  if (typeof isSupabaseConfigured === 'function' && isSupabaseConfigured() && typeof sbSaveScore === 'function') {
+    sbSaveScore(getCurrentPlayerDisplayName(), raceState.loc?.id || 'race', Number(state.rep) || 0, {
+      isWin,
+      isArena,
+      isTournament: isTourn,
+      trackName: raceState.loc?.name || '',
+      finalTime: Number(finalTime) || 0,
+      cash: earnedCash,
+      gold: earnedGold
+    });
+  }
   renderCityQuests();
   showToast('🎁 Награда за ежедневное задание получена!');
 }
@@ -8252,7 +8268,12 @@ function adminEditAnyCarText(source, idx, field, val) {
 function adminEditAnyCar(source, idx, field, val) {
   const arr = source === 'auction' ? state.auctionCars : state.cars;
   if (!arr || !arr[idx]) return;
-  arr[idx][field] = Number(val) || 0;
+  const num = Number(val);
+  arr[idx][field] = Number.isFinite(num) ? num : 0;
+  if (field === 'rearWheelY' || field === 'frontWheelY') {
+    arr[idx].wheelY = arr[idx][field];
+  }
+  saveGame();
   updateUI();
 }
 
@@ -9225,7 +9246,7 @@ async function resetFullGame() {
       (state.rims || []).forEach(r => { existingById[r.id] = r; });
       state.rims = DEFAULT_RIMS.map(dr => (existingById[dr.id] && existingById[dr.id].url) ? existingById[dr.id] : JSON.parse(JSON.stringify(dr)));
     }
-    if (state.spritePackVersion !== 58) {
+    if (!state.spritePackVersion || state.spritePackVersion < 76) {
       const defCarMap = {};
       DEFAULT_CARS.forEach(c => { defCarMap[c.id] = c; });
       const defAucMap = {};
@@ -9275,7 +9296,7 @@ async function resetFullGame() {
       state.uiAssets.tournamentTrackBg = DEFAULT_UI_ASSETS.tournamentTrackBg;
       state.uiAssets.tournamentBgmUrl = DEFAULT_UI_ASSETS.tournamentBgmUrl;
       state.uiAssets.trackBgPool = JSON.parse(JSON.stringify(DEFAULT_UI_ASSETS.trackBgPool));
-      state.spritePackVersion = 59;
+      state.spritePackVersion = 76;
     }
   }
   preloadAllAssets();
