@@ -8945,12 +8945,18 @@ function renderAdminTuning() {
   state.rims.forEach((r, idx) => {
     const row = document.createElement('div');
     row.style.cssText = 'display:flex; justify-content:space-between; align-items:center; background:#0b0d12; padding:5px 8px; border-radius:6px; margin-bottom:4px; font-size:11px;';
+    row.style.cssText = 'display:flex; flex-direction:column; gap:5px; background:#0b0d12; padding:6px 8px; border-radius:6px; margin-bottom:5px; font-size:11px;';
     row.innerHTML = `
-      <div>🛞 <strong>${r.name}</strong> ($${r.price}) ${r.url ? '✅' : ''}</div>
-      <div style="display:flex; gap:4px;">
-        <label class="file-upload-label" style="padding:2px 6px; font-size:10px;">📁 PNG<input type="file" accept="image/*" onchange="adminUploadExistingRim(${idx}, this)" /></label>
-        ${r.id !== 'stock' ? `<button class="btn btn-danger btn-sm" style="padding:2px 6px; font-size:10px;" onclick="state.rims.splice(${idx},1); updateUI(); renderAdminTuning();">✕</button>` : ''}
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:5px;">
+        <input type="text" value="${String(r.name || '').replace(/"/g, '&quot;')}" style="flex:1; background:#151923; border:1px solid var(--border); color:#fff; padding:4px 6px; border-radius:5px; font-size:11px; font-weight:700;"
+          onchange="adminUpdateRimField(${idx}, 'name', this.value)" />
+        <input type="number" value="${Number(r.price) || 0}" min="0" style="width:72px; background:#151923; border:1px solid var(--green); color:#6ee7b7; padding:4px 6px; border-radius:5px; font-size:11px; font-weight:700;"
+          onchange="adminUpdateRimField(${idx}, 'price', this.value)" />
+        <label class="file-upload-label" style="padding:4px 6px; font-size:10px;">📁 PNG<input type="file" accept="image/*" onchange="adminUploadExistingRim(${idx}, this)" /></label>
+        ${r.id !== 'stock' ? `<button class="btn btn-danger btn-sm" style="padding:2px 6px; font-size:10px;" onclick="state.rims.splice(${idx},1); saveGame(); updateUI(); renderAdminTuning();">✕</button>` : ''}
       </div>
+      <input type="text" value="${String(r.url || '').replace(/"/g, '&quot;')}" placeholder="URL или data:image/..." style="width:100%; background:#151923; border:1px solid var(--border); color:#9ca3af; padding:3px 6px; border-radius:5px; font-size:10px;"
+        onchange="adminUpdateRimField(${idx}, 'url', this.value)" />
     `;
     rBox.appendChild(row);
   });
@@ -8979,6 +8985,19 @@ function adminAddRim() {
   if (url) preloadImageAsset('rim_' + id, url);
   pendingNewRimUrl = ''; document.getElementById('newRimName').value = ''; document.getElementById('newRimUrl').value = '';
   updateUI(); renderAdminTuning(); showToast('Диск добавлен!');
+}
+function adminUpdateRimField(idx, field, val) {
+  if (!state.rims || !state.rims[idx]) return;
+  if (field === 'price') {
+    state.rims[idx].price = Math.max(0, Number(val) || 0);
+  } else if (field === 'name') {
+    state.rims[idx].name = String(val || '').trim() || state.rims[idx].name;
+  } else if (field === 'url') {
+    state.rims[idx].url = String(val || '').trim();
+    if (state.rims[idx].url) preloadImageAsset('rim_' + state.rims[idx].id, state.rims[idx].url);
+  }
+  saveGame();
+  updateUI();
 }
 function adminUploadExistingRim(idx, input) {
   const f = input.files && input.files[0]; if (!f) return;
@@ -9474,7 +9493,24 @@ async function resetFullGame() {
           loc.rivalCarId = defLocMap[loc.id].rivalCarId;
         }
       });
-      state.rims = JSON.parse(JSON.stringify(DEFAULT_RIMS));
+      (function() {
+        const prevRims = Array.isArray(state.rims) ? state.rims : [];
+        const prevById = {};
+        prevRims.forEach(r => { if (r && r.id) prevById[r.id] = r; });
+        const merged = DEFAULT_RIMS.map(dr => {
+          const ex = prevById[dr.id];
+          if (!ex) return JSON.parse(JSON.stringify(dr));
+          return Object.assign({}, JSON.parse(JSON.stringify(dr)), ex, {
+            url: (ex.url && ex.url.trim()) ? ex.url : dr.url
+          });
+        });
+        prevRims.forEach(ex => {
+          if (ex && ex.id && !DEFAULT_RIMS.some(dr => dr.id === ex.id)) {
+            merged.push(JSON.parse(JSON.stringify(ex)));
+          }
+        });
+        state.rims = merged;
+      })();
       state.uiAssets.garageBg = DEFAULT_UI_ASSETS.garageBg;
       state.uiAssets.shopBg = DEFAULT_UI_ASSETS.shopBg;
       state.uiAssets.auctionBg = DEFAULT_UI_ASSETS.auctionBg;
