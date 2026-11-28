@@ -1,18 +1,25 @@
 {
   "name": "7VIK Street Racing — Драг-гонки 402м",
   "short_name": "7VIK Racing",
-  "description": "Мобильные уличные драг-гонки на 402 метра с тюнингом, гаражом и админ-панелью.",
+  "description": "Уличные драг-гонки 402м, тюнинг, автосалон, аукцион, арена и турниры.",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#0b0d12",
   "theme_color": "#0b0d12",
+  "lang": "ru",
   "icons": [
     {
-      "src": "icon.svg",
-      "sizes": "any",
-      "type": "image/svg+xml",
+      "src": "./icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
       "purpose": "any maskable"
     }
   ]
